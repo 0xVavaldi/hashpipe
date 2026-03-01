@@ -13,11 +13,11 @@ Uses [yarn.c](https://github.com/madler/pigz) for threading and OpenSSL for hash
 | Type | Algorithm | MDXfind | hashcat |
 |------|-----------|---------|---------|
 | MD5 | `md5($pass)` | e1 | -m 0 |
-| MD5UC | `md5($pass)` (uppercase hex) | e1 | -m 0 |
+| MD5UC | `md5($pass)` (uppercase hex) | e2 | -m 0 |
 | MD4 | `md4($pass)` | e3 | -m 900 |
 | NTLM | `md4(utf16le($pass))` | e369 | -m 1000 |
 | SHA1 | `sha1($pass)` | e8 | -m 100 |
-| SHA1UC | `sha1($pass)` (uppercase hex) | e8 | -m 100 |
+| SHA1UC | `sha1($pass)` (uppercase hex) | e182 | -m 100 |
 | SHA224 | `sha224($pass)` | e9 | -m 1300 |
 | SHA256 | `sha256($pass)` | e10 | -m 1400 |
 | SHA384 | `sha384($pass)` | e11 | -m 10800 |
