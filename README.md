@@ -10,30 +10,30 @@ Uses [yarn.c](https://github.com/madler/pigz) for threading and OpenSSL for hash
 
 ## Supported Hash Types
 
-| Type | Description |
-|------|-------------|
-| MD4 | MD4 hash |
-| MD5 | MD5 hash |
-| NTLM | NT LAN Manager (MD4 of UTF-16LE) |
-| SHA1 | SHA-1 hash |
-| SHA224 | SHA-224 hash |
-| SHA256 | SHA-256 hash |
-| SHA384 | SHA-384 hash |
-| SHA512 | SHA-512 hash |
-| DCC | Domain Cached Credentials (MS-Cache v1) |
-| DCC2 | Domain Cached Credentials v2 (PBKDF2) |
-| NETLM | NetLM challenge-response |
-| NETLMv2 | NetLMv2 challenge-response |
-| NETNTLMv2 | NetNTLMv2 challenge-response |
-| SHA1MD5 | SHA1(MD5(password)) |
-| MD5SHA1 | MD5(SHA1(password)) |
-| MD5MD5 | MD5(MD5(password)) |
-| HMACMD5 | HMAC-MD5 with salt as key |
-| HMACSHA1 | HMAC-SHA1 with salt as key |
-| HMACSHA256 | HMAC-SHA256 with salt as key |
-| SSHA1 | Salted SHA-1 (salt appended) |
-| SSHA256 | Salted SHA-256 (salt appended) |
-| SSHA512 | Salted SHA-512 (salt appended) |
+| Type | Algorithm | MDXfind | hashcat |
+|------|-----------|---------|---------|
+| MD5 | `md5($pass)` | e1 | -m 0 |
+| MD5UC | `md5($pass)` (uppercase hex) | e1 | -m 0 |
+| MD4 | `md4($pass)` | e3 | -m 900 |
+| NTLM | `md4(utf16le($pass))` | e369 | -m 1000 |
+| SHA1 | `sha1($pass)` | e8 | -m 100 |
+| SHA1UC | `sha1($pass)` (uppercase hex) | e8 | -m 100 |
+| SHA224 | `sha224($pass)` | e9 | -m 1300 |
+| SHA256 | `sha256($pass)` | e10 | -m 1400 |
+| SHA384 | `sha384($pass)` | e11 | -m 10800 |
+| SHA512 | `sha512($pass)` | e12 | -m 1700 |
+| MD5PASSSALT | `md5($pass.$salt)` | e373 | -m 10 |
+| MD5SALT | `md5(hex(md5($pass)).$salt)` | e31 | -m 2611 |
+| SHA1SALTPASS | `sha1($salt.$pass)` | e385 | -m 120 |
+| SHA1PASSSALT | `sha1($pass.$salt)` | e405 | -m 110 |
+| SHA256SALTPASS | `sha256($salt.$pass)` | e412 | -m 1420 |
+| SHA256PASSSALT | `sha256($pass.$salt)` | e413 | -m 1410 |
+| SHA512SALTPASS | `sha512($salt.$pass)` | e388 | -m 1720 |
+| SHA512PASSSALT | `sha512($pass.$salt)` | e386 | -m 1710 |
+| MD5MD5PASS | `md5(hex(md5($pass)).$pass)` | e123 | — |
+| MD5MD5PASS | `md5(hex(md5($pass)).":".$pass)` | e123 | — |
+| SHA1MD5 | `sha1(hex(md5($pass)))` | e160 | -m 4700 |
+| MD5SHA1 | `md5(hex(sha1($pass)))` | e178 | -m 4400 |
 
 ## Building
 
