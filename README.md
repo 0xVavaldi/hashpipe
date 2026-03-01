@@ -64,7 +64,7 @@ hashpipe -t 8 potfile.txt
 
 Pipe verified results directly into mdsplit:
 ```
-cat potfile.txt | hashpipe | mdsplit
+hashpipe potfile.txt | mdsplit potfile.txt
 ```
 
 Verify multiple files:
