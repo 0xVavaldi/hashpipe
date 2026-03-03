@@ -199,6 +199,7 @@ hashpipe supports 757 hash types.  Run `hashpipe -h` for the full list.
 | e455 | PHPBB3 | `phpbb3($pass)` |
 | e457 | APACHE-SHA | `{SHA}base64(sha1($pass))` |
 | e461 | APR1 | `apr1($pass)` |
+| e884 | SCRYPT | `scrypt($pass, $salt, N, r, p)` |
 
 ### Additional algorithm families
 
@@ -231,10 +232,16 @@ Use `-b` to benchmark specific types: `-b e1,e8-e12,e450`.
 ## Building
 
 ```bash
+./setup.sh        # install system packages and build vendored libraries
 make hashpipe
 ```
 
-Requires OpenSSL, libsph, librhash, libmhash, libJudy, bcrypt, and GOST/Streebog libraries.  Static `.a` archives are expected in the project root.
+To remove all generated libraries and headers:
+```bash
+./setup.sh clean
+```
+
+Requires OpenSSL, libsph, librhash, libmhash, libJudy, bcrypt, yescrypt, and GOST/Streebog libraries.  `setup.sh` handles all of these automatically.  Static `.a` archives are expected in the project root.
 
 ## Type Indices
 
@@ -259,6 +266,7 @@ hashpipe depends on the following libraries:
 - [RHash](https://github.com/rhash/RHash) — RHash Project
 - [libmhash](https://mhash.sourceforge.net/) — Nikos Mavroyanopoulos, Sascha Schumann
 - [bcrypt](https://www.openwall.com/crypt/) — Niels Provos, David Mazieres (via Openwall crypt_blowfish)
+- [yescrypt](https://www.openwall.com/yescrypt/) — Alexander Peslyak (via Openwall)
 
 ## License
 
