@@ -1,5 +1,4 @@
 *.o
 *.exe
 /hashpipe
-Makefile
 .claude/
