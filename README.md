@@ -20,7 +20,7 @@ hashpipe [-t N] [-i N] [-q N] [-m S] [-o outfile] [-e errfile] [-b spec] [-B] [-
 |------|-------------|
 | `-t N` | Thread count (default: number of CPUs) |
 | `-i N` | Max iteration count for hard pass (default: 128) |
-| `-q N` | Quantization (reserved, default: 128) |
+| `-q N` | Maximum internal hash iteration (default: 128) |
 | `-m S` | Only try types in S (e.g., `-m e1,e8`); add `auto` to fallback to auto-detect |
 | `-o F` | Output verified results to file (default: stdout) |
 | `-e F` | Output unresolved lines to file (default: stderr) |
