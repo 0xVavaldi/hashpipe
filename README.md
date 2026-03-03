@@ -104,9 +104,46 @@ hashpipe -b e1,e8-e12
 
 For many years, I have taken the position that potfiles, the place where solved hashes go to die, are not only bad, but also dangerous.  They can confuse what hash types are involved, or what the algorithm is, and can introduce bad solutions into an otherwise perfect hash processing stream.  Hashpipe is intended to be an automated method to resolve, or verify, questionable hashes.  By trying many different hashing methods, in a fully automated fashion, hashpipe can figure out what types of hashes are involved, properly format the output, and can pipe directly into mdsplit for long term hash management.  Much more to the point, it also separates out the unsolved hashes, corrupted entries, or other bad data.
 
+## Architecture
+
+### Threading Model
+
+hashpipe uses a producer-consumer architecture with [yarn.c](https://github.com/madler/pigz) (Mark Adler's thread pool abstraction over pthreads):
+
+- **Main thread** reads input lines into fixed-size batches, then enqueues them for worker threads.
+- **Worker threads** (one per CPU by default) dequeue batches and verify each item by computing the hash and comparing.
+- Batches are recycled through a free-list pool to avoid allocation overhead.
+
+### Adaptive Batch Sizing
+
+Fixed batch sizes cause slow hash types (bcrypt at ~5 hashes/sec) to bottleneck on a single thread.  hashpipe uses adaptive batch sizing to distribute work evenly:
+
+- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 757 pre-measured rates or from runtime `-B`/`-b` benchmarks.
+- **BatchLimit** = `rate * 0.75` (target 0.75 seconds of work per batch), clamped to [1, 4096].
+- When `-m` specifies types, BatchLimit is pre-set from the slowest selected type.
+- In auto-detect mode, BatchLimit starts at `Numthreads * 4` and the worker feedback loop adjusts it as hash types are identified.
+
+This achieves near-linear scaling for slow types: 1000 bcrypt cost-12 hashes run in ~13 seconds on 16 threads vs ~170 seconds single-threaded.
+
+### Hot Type Optimization
+
+hashpipe tracks the most recently matched hash type as a "hot type" and a hot list of recent matches.  When processing a batch, workers try the hot type first before falling back to the full candidate scan.  For homogeneous input (common in potfiles), this avoids testing hundreds of types per line.
+
+### Verification Strategies
+
+Hash types use one of three verification strategies:
+
+- **Direct compute**: compute the hash from the password and compare the binary result against the decoded hex input.  Used for simple types (MD5, SHA1, SHA256, etc.) and composed chains.
+- **Chain compute**: a chain of hash steps defined declaratively (innermost to outermost), supporting UC (uppercase hex), NTLM (UTF-16LE), salt insertion, and raw binary passes.  Covers hundreds of composed types like `SHA1(MD5($pass))`.
+- **Verify function**: a custom function that takes the hash string and password, returning match/no-match.  Used for non-hex formats where the hash encodes its own parameters: bcrypt (cost factor in hash), PHPBB3, APACHE-SHA, APR1.
+
+### Per-hashlen Candidate Caches
+
+Rather than scanning all 757 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
+
 ## Supported Hash Types
 
-hashpipe supports 565 hash types.  Run `hashpipe -h` for the full list.
+hashpipe supports 757 hash types.  Run `hashpipe -h` for the full list.
 
 ### Common types
 
@@ -167,13 +204,49 @@ hashpipe supports 565 hash types.  Run `hashpipe -h` for the full list.
 
 hashpipe also supports GOST, GOST-CRYPTO, Streebog, RIPEMD-128/160/320, TIGER, HAVAL (all variants), BLAKE-224/256/384/512, BMW, CubeHash, ECHO, Fugue, Groestl, Hamsi, JH, Keccak, SHA-3, Luffa, Panama, RadioGatun, Shabal, SHAvite, SIMD, Skein, Whirlpool, MD6, MDC2, EDON, Snefru, HAS-160, BLAKE2B/2S, MurmurHash, RADMIN2, LM, and hundreds of composed/chained variants.
 
+## Benchmarking
+
+`hashpipe -B` benchmarks all 757 registered types and reports hashes/second for each:
+
+```
+$ hashpipe -B | head -10
+e1      MD5     7613341 16      0x00
+e2      MD5UC   4153321 16      0x04
+e3      MD4     4765041 16      0x00
+e8      SHA1    2297819 20      0x00
+e10     SHA256  1951415 32      0x00
+e12     SHA512  772145  64      0x00
+e369    NTLM    3005558 16      0x08
+e450    BCRYPT  5       0       0x40
+e455    PHPBB3  1747    0       0x40
+e461    APR1    3147    0       0x40
+```
+
+Output format: `index  name  rate  hashlen  flags`
+
+Types that cannot be benchmarked (missing dependencies) show `n/a` for rate.
+
+Use `-b` to benchmark specific types: `-b e1,e8-e12,e450`.
+
 ## Building
 
 ```bash
 make hashpipe
 ```
 
-Requires OpenSSL, libsph, librhash, libJudy, and GOST/Streebog libraries.
+Requires OpenSSL, libsph, librhash, libmhash, libJudy, bcrypt, and GOST/Streebog libraries.  Static `.a` archives are expected in the project root.
+
+## Type Indices
+
+hashpipe uses the same type index numbering as mdxfind. The `e` prefix distinguishes internal indices from hashcat mode numbers. When using `-m`, always use the `e` prefix:
+
+```bash
+# Correct: internal index
+hashpipe -m e1,e8,e450 potfile.txt
+
+# Multiple ranges
+hashpipe -m e1-e12,e369,e450-e461 potfile.txt
+```
 
 ## License
 
