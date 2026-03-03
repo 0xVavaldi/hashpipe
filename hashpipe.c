@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.17 2026/03/03 03:00:51 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.18 2026/03/03 05:09:37 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -332,6 +332,7 @@ struct hashtype {
     int flags;
     hashfn_t compute;
     hashfn_t compute_alt;      /* alternate compute (e.g. HUM prepend variant) */
+    hashfn_t iter_fn;          /* inner iteration function for x-types, or NULL for hash_by_len */
     verifyfn_t verify;         /* non-hex format verifier (bcrypt, APACHE-SHA, etc.) */
     int nchain;                /* 0 = use compute; >0 = use chain[] */
     struct chain_step *chain;  /* chain[0]=innermost, chain[nchain-1]=outermost */
@@ -3324,6 +3325,207 @@ static void compute_sha1revbase64x(const unsigned char *pass, int passlen,
     while (blen > 0 && b64[blen - 1] == '=') blen--;
     reverse_str(b64, blen);
     SHA1((unsigned char *)b64, blen, dest);
+}
+
+/* ---- x-type compute functions: two-level iteration ----
+ * Outer iteration: controlled by salt (parsed as integer).
+ * Inner iteration: handled by generic iteration loops in verify_item.
+ * The salt field carries the outer iteration count (e.g., "1", "2", "3").
+ */
+
+/* Parse salt bytes as a decimal integer; return 1 if invalid/absent */
+static int salt_to_int(const unsigned char *salt, int saltlen)
+{
+    int val = 0, i;
+    if (!salt || saltlen <= 0) return 1;
+    for (i = 0; i < saltlen; i++) {
+        if (salt[i] < '0' || salt[i] > '9') return 1;
+        val = val * 10 + (salt[i] - '0');
+    }
+    return val < 1 ? 1 : val;
+}
+
+/* SHA1MD5x: outer=iterate MD5, inner=iterate SHA1.
+ * x01 salt=N: SHA1(hex(MD5^N(pass))) */
+static void compute_sha1md5x(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char bin[16];
+    char hex[33];
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    for (i = 0; i < outer; i++) {
+        rhash_msg(RHASH_MD5, cur, curlen, bin);
+        prmd5(bin, hex, 32);
+        cur = (const unsigned char *)hex;
+        curlen = 32;
+    }
+    SHA1(cur, curlen, dest);
+}
+
+/* SHA1SHA256x: outer=iterate SHA256(lc hex), inner=iterate SHA1.
+ * x01 salt=N: SHA1(hex(SHA256^N(pass))) */
+static void compute_sha1sha256x(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char bin[32];
+    char hex[65];
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    for (i = 0; i < outer; i++) {
+        SHA256(cur, curlen, bin);
+        prmd5(bin, hex, 64);
+        cur = (const unsigned char *)hex;
+        curlen = 64;
+    }
+    SHA1(cur, curlen, dest);
+}
+
+/* SHA1SHA256UCx: outer=iterate SHA256(UC hex), inner=iterate SHA1.
+ * x01 salt=N: SHA1(hexUC(SHA256^N(pass))) */
+static void compute_sha1sha256ucx(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char bin[32];
+    char hex[65];
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    for (i = 0; i < outer; i++) {
+        SHA256(cur, curlen, bin);
+        prmd5UC(bin, hex, 64);
+        cur = (const unsigned char *)hex;
+        curlen = 64;
+    }
+    SHA1(cur, curlen, dest);
+}
+
+/* SHA1MD5UCx: outer=iterate MD5(UC hex), inner=iterate SHA1.
+ * x01 salt=N: SHA1(hexUC(MD5^N(pass))) */
+static void compute_sha1md5ucx(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char bin[16];
+    char hex[33];
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    for (i = 0; i < outer; i++) {
+        rhash_msg(RHASH_MD5, cur, curlen, bin);
+        prmd5UC(bin, hex, 32);
+        cur = (const unsigned char *)hex;
+        curlen = 32;
+    }
+    SHA1(cur, curlen, dest);
+}
+
+/* SHA1MD5MD5UCx: outer=iterate MD5(UC hex), then MD5(lc hex) + SHA1.
+ * x01 salt=N: SHA1(hex(MD5(hexUC(MD5^N(pass))))) */
+static void compute_sha1md5md5ucx(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char bin[16];
+    char hex[33], hex2[33];
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    for (i = 0; i < outer; i++) {
+        rhash_msg(RHASH_MD5, cur, curlen, bin);
+        prmd5UC(bin, hex, 32);
+        cur = (const unsigned char *)hex;
+        curlen = 32;
+    }
+    /* MD5(UC hex) -> hex -> SHA1(hex) */
+    rhash_msg(RHASH_MD5, cur, curlen, bin);
+    prmd5(bin, hex2, 32);
+    SHA1((unsigned char *)hex2, 32, dest);
+}
+
+/* SHA1revBASE64x: outer=iterate base64-no-pad + reverse, inner=iterate SHA1.
+ * x01 salt=N: SHA1(reverse(base64_nopad^N(pass))) */
+static void compute_sha1revbase64x_outer(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    char b64[1024], rev[1024];
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    for (i = 0; i < outer; i++) {
+        int blen = base64_encode(cur, curlen, b64, sizeof(b64));
+        while (blen > 0 && b64[blen - 1] == '=') blen--;
+        /* reverse into rev */
+        {
+            int j;
+            for (j = 0; j < blen; j++) rev[blen - 1 - j] = b64[j];
+        }
+        rev[blen] = 0;
+        cur = (const unsigned char *)rev;
+        curlen = blen;
+    }
+    SHA1(cur, curlen, dest);
+}
+
+/* MD4UTF16MD5x: outer=iterate MD5(lc hex), inner=iterate NTLM.
+ * x01 salt=N: NTLM(hex(MD5^N(pass))) */
+static void compute_md4utf16md5x(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char bin[16];
+    char hex[33];
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    for (i = 0; i < outer; i++) {
+        rhash_msg(RHASH_MD5, cur, curlen, bin);
+        prmd5(bin, hex, 32);
+        cur = (const unsigned char *)hex;
+        curlen = 32;
+    }
+    compute_ntlm(cur, curlen, NULL, 0, dest);
+}
+
+/* MD4UTF16SHA1x: outer=iterate SHA1(lc hex), inner=iterate NTLM.
+ * x01 salt=N: NTLM(hex(SHA1^N(pass))) */
+static void compute_md4utf16sha1x(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char bin[20];
+    char hex[41];
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    for (i = 0; i < outer; i++) {
+        SHA1(cur, curlen, bin);
+        prmd5(bin, hex, 40);
+        cur = (const unsigned char *)hex;
+        curlen = 40;
+    }
+    compute_ntlm(cur, curlen, NULL, 0, dest);
+}
+
+/* MD4UTF16revBASE64x: outer=iterate base64-no-pad + reverse, inner=iterate NTLM.
+ * x01 salt=N: NTLM(reverse(base64_nopad^N(pass))) */
+static void compute_md4utf16revbase64x(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    char b64[1024], rev[1024];
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    for (i = 0; i < outer; i++) {
+        int blen = base64_encode(cur, curlen, b64, sizeof(b64));
+        while (blen > 0 && b64[blen - 1] == '=') blen--;
+        {
+            int j;
+            for (j = 0; j < blen; j++) rev[blen - 1 - j] = b64[j];
+        }
+        rev[blen] = 0;
+        cur = (const unsigned char *)rev;
+        curlen = blen;
+    }
+    compute_ntlm(cur, curlen, NULL, 0, dest);
 }
 
 /* SHA1BASE64CUSTBASE64MD5: SHA1(base64_custom(base64(raw(rhash_msg(RHASH_MD5, pass))))) */
@@ -7572,6 +7774,7 @@ static void init_hashtypes(void)
             Hashtypes[_i].flags = (fl); \
             Hashtypes[_i].compute = (fn); \
             Hashtypes[_i].compute_alt = NULL; \
+            Hashtypes[_i].iter_fn = NULL; \
             Hashtypes[_i].verify = NULL; \
             Hashtypes[_i].nchain = 0; \
             Hashtypes[_i].chain = NULL; \
@@ -7587,6 +7790,7 @@ static void init_hashtypes(void)
             Hashtypes[_i].flags = (fl); \
             Hashtypes[_i].compute = (fn); \
             Hashtypes[_i].compute_alt = (altfn); \
+            Hashtypes[_i].iter_fn = NULL; \
             Hashtypes[_i].verify = NULL; \
             Hashtypes[_i].nchain = 0; \
             Hashtypes[_i].chain = NULL; \
@@ -7602,6 +7806,7 @@ static void init_hashtypes(void)
             Hashtypes[_i].flags = (fl); \
             Hashtypes[_i].compute = NULL; \
             Hashtypes[_i].compute_alt = NULL; \
+            Hashtypes[_i].iter_fn = NULL; \
             Hashtypes[_i].verify = NULL; \
             Hashtypes[_i].nchain = sizeof(chain_arr) / sizeof(chain_arr[0]); \
             Hashtypes[_i].chain = (chain_arr); \
@@ -7617,6 +7822,7 @@ static void init_hashtypes(void)
             Hashtypes[_i].flags = (fl) | HTF_NONHEX; \
             Hashtypes[_i].compute = NULL; \
             Hashtypes[_i].compute_alt = NULL; \
+            Hashtypes[_i].iter_fn = NULL; \
             Hashtypes[_i].verify = (vfn); \
             Hashtypes[_i].nchain = 0; \
             Hashtypes[_i].chain = NULL; \
@@ -8141,15 +8347,19 @@ static void init_hashtypes(void)
     /* Types ending in 'x' are just iteration markers — the xNN is parsed from the hint */
     /* MD5SHA1x = MD5SHA1 with arbitrary iteration */
     HT("MD5SHA1x",      16, HTF_COMPOSED, compute_sha1md5, NULL);
-    HT("SHA1MD5x",      20, HTF_COMPOSED, compute_md5sha1, "92ac0281d4695ec3710f690e029a6320ca7e5244:1:password123");
+    HT("SHA1MD5x",      20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5x, "92ac0281d4695ec3710f690e029a6320ca7e5244:1:password123");
     HTC("MD5SHA1MD5x",  16, HTF_COMPOSED, chain_md5sha1md5md5, "3b4f022014f794549416f9c1bd25fa63:1:password123"); /* actually MD5SHA1MD5 */
-    HT("MD4UTF16MD5x",  16, HTF_COMPOSED, compute_md4utf16md5, NULL);
-    HT("MD4UTF16SHA1x", 20, HTF_COMPOSED, compute_md4utf16sha1, NULL);
+    HT("MD4UTF16MD5x",  16, HTF_SALTED | HTF_COMPOSED, compute_md4utf16md5x, NULL);
+    Hashtypes[find_type_index("MD4UTF16MD5x")].iter_fn = (hashfn_t)compute_ntlm;
+    HT("MD4UTF16SHA1x", 16, HTF_SALTED | HTF_COMPOSED, compute_md4utf16sha1x, NULL);
+    Hashtypes[find_type_index("MD4UTF16SHA1x")].iter_fn = (hashfn_t)compute_ntlm;
+    HT("MD4UTF16revBASE64x", 16, HTF_SALTED | HTF_COMPOSED, compute_md4utf16revbase64x, NULL);
+    Hashtypes[find_type_index("MD4UTF16revBASE64x")].iter_fn = (hashfn_t)compute_ntlm;
     HT("MD4UTF16SHA256x",32,HTF_COMPOSED, compute_md4utf16sha256, NULL);
-    HTC("SHA1MD5UCx",   20, HTF_COMPOSED, chain_sha1md5ucmd5, NULL);  /* SHA1(hexUC(rhash_msg(RHASH_MD5, pass))) iter */
-    HTC("SHA1MD5MD5UCx", 20, HTF_COMPOSED, chain_sha1_md5_md5uc, NULL);
-    HTC("SHA1SHA256UCx",20, HTF_COMPOSED, chain_sha1_sha256uc, NULL);
-    HTC("SHA1SHA256x",  20, HTF_COMPOSED, chain_sha1sha256sha1, NULL);  /* SHA1SHA256 iter */
+    HT("SHA1MD5UCx",    20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5ucx, NULL);
+    HT("SHA1MD5MD5UCx", 20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5md5ucx, NULL);
+    HT("SHA1SHA256UCx", 20, HTF_SALTED | HTF_COMPOSED, compute_sha1sha256ucx, NULL);
+    HT("SHA1SHA256x",   20, HTF_SALTED | HTF_COMPOSED, compute_sha1sha256x, NULL);
 
     /* --- Additional SHA1MD5 CAP chains --- */
     /* SHA1MD5CAP = SHA1(hex(rhash_msg(RHASH_MD5, capitalize(pass)))) */
@@ -8483,7 +8693,7 @@ static void init_hashtypes(void)
     HT("SHA1SQL5-32",            20, HTF_COMPOSED, compute_sha1sql5_32, "5739376a1bd807fca1068819f1678880d2b28d8f:password123");
     HT("MD5DECBASE64MD5BASE64MD5",16, HTF_COMPOSED, compute_md5decbase64md5base64md5, "9f9f634ab9e3e48f188f2021f82b78a7:password123");
     HT("SHA1revBASE64",          20, HTF_COMPOSED, compute_sha1revbase64, "aaff177fba258a06cccc183169de9bc2e4fef050:password123");
-    HT("SHA1revBASE64x",         20, HTF_SALTED | HTF_COMPOSED, compute_sha1revbase64x, "aaff177fba258a06cccc183169de9bc2e4fef050:1:password123");
+    HT("SHA1revBASE64x",         20, HTF_SALTED | HTF_COMPOSED, compute_sha1revbase64x_outer, "aaff177fba258a06cccc183169de9bc2e4fef050:1:password123");
     HT("SHA1BASE64CUSTBASE64MD5",20, HTF_COMPOSED, compute_sha1base64custbase64md5, "071bce9a60b5d9c9eab1fa2ad17cccda21040f5b:password123");
 
     /* --- Batch 5: HUM types — inner_hash → hex → append/prepend decoded salt bytes → outer_hash
@@ -8910,6 +9120,7 @@ struct batch {
 static volatile int BatchLimit = BATCH_SIZE;
 static int Numthreads = 1;
 static int Maxiter = 128;
+static int Iterstep = 128;
 static FILE *Outfp;
 static FILE *Errfp;
 static int *ModeList;                   /* -m: ordered array of type indices */
@@ -9463,11 +9674,15 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
 
             /* Composed: compute x01 via chain, iterate outer hash */
             if (ht->flags & HTF_COMPOSED) {
+                int maxinner = ht->iter_fn ? Iterstep : Maxiter;
                 hash_compute(ht, pass, passlen, NULL, 0, iterbuf);
-                for (iter = 2; iter <= Maxiter; iter++) {
+                for (iter = 2; iter <= maxinner; iter++) {
                     prmd5(iterbuf, hexiter, fullbytes * 2);
-                    hash_by_len(fullbytes, (unsigned char *)hexiter,
-                                fullbytes * 2, computed);
+                    if (ht->iter_fn)
+                        ht->iter_fn((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
+                    else
+                        hash_by_len(fullbytes, (unsigned char *)hexiter,
+                                    fullbytes * 2, computed);
                     if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                         item->verified = 1;
                         item->match_type = ht;
@@ -9483,11 +9698,15 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             /* Salted: salt in base computation, iterate without salt */
             if ((ht->flags & HTF_SALTED) && saltbinlen > 0 &&
                 !(ht->flags & HTF_UC)) {
+                int maxinner = ht->iter_fn ? Iterstep : Maxiter;
                 hash_compute(ht, pass, passlen, saltbin, saltbinlen, iterbuf);
-                for (iter = 2; iter <= Maxiter; iter++) {
+                for (iter = 2; iter <= maxinner; iter++) {
                     prmd5(iterbuf, hexiter, fullbytes * 2);
-                    hash_by_len(fullbytes, (unsigned char *)hexiter,
-                                fullbytes * 2, computed);
+                    if (ht->iter_fn)
+                        ht->iter_fn((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
+                    else
+                        hash_by_len(fullbytes, (unsigned char *)hexiter,
+                                    fullbytes * 2, computed);
                     if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                         item->verified = 1;
                         item->match_type = ht;
@@ -9645,19 +9864,25 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             }
 
             memcpy(iterbuf, computed, fullbytes);
-            for (iter = 2; iter <= Maxiter; iter++) {
-                prmd5(iterbuf, hexiter, fullbytes * 2);
-                hash_by_len(fullbytes, (unsigned char *)hexiter,
-                            fullbytes * 2, computed);
-                if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
-                    item->verified = 1;
-                    item->match_type = ccands[c];
-                    item->match_iter = iter;
-                    *hot_type = ccands[c] - Hashtypes;
-                    *hot_iter = iter;
-                    return;
+            {
+                int maxinner = ccands[c]->iter_fn ? Iterstep : Maxiter;
+                for (iter = 2; iter <= maxinner; iter++) {
+                    prmd5(iterbuf, hexiter, fullbytes * 2);
+                    if (ccands[c]->iter_fn)
+                        ccands[c]->iter_fn((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
+                    else
+                        hash_by_len(fullbytes, (unsigned char *)hexiter,
+                                    fullbytes * 2, computed);
+                    if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
+                        item->verified = 1;
+                        item->match_type = ccands[c];
+                        item->match_iter = iter;
+                        *hot_type = ccands[c] - Hashtypes;
+                        *hot_iter = iter;
+                        return;
+                    }
+                    memcpy(iterbuf, computed, fullbytes);
                 }
-                memcpy(iterbuf, computed, fullbytes);
             }
         }
     }
@@ -9669,18 +9894,23 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         for (c = 0; c < ncands; c++) {
             char hexiter[MAX_HASH_BYTES * 2 + 1];
             int fullbytes;
+            int maxinner;
 
             if (cands[c]->flags & HTF_UC) continue;
 
             fullbytes = cands[c]->hashlen;
+            maxinner = cands[c]->iter_fn ? Iterstep : Maxiter;
 
             /* Compute base with salt */
             hash_compute(cands[c], pass, passlen, saltbin, saltbinlen, iterbuf);
 
-            for (iter = 2; iter <= Maxiter; iter++) {
+            for (iter = 2; iter <= maxinner; iter++) {
                 prmd5(iterbuf, hexiter, fullbytes * 2);
-                hash_by_len(fullbytes, (unsigned char *)hexiter,
-                            fullbytes * 2, computed);
+                if (cands[c]->iter_fn)
+                    cands[c]->iter_fn((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
+                else
+                    hash_by_len(fullbytes, (unsigned char *)hexiter,
+                                fullbytes * 2, computed);
                 if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                     item->verified = 1;
                     item->match_type = cands[c];
@@ -10515,7 +10745,7 @@ static void usage(int brief)
         "\n"
         "  -t N   Thread count (default: number of CPUs)\n"
         "  -i N   Max iteration count for hard pass (default: 128)\n"
-        "  -q N   Quantization (reserved, default: 128)\n"
+        "  -q N   Iteration step size (reserved, default: 128)\n"
         "  -m S   Only try types in S (e.g., -m e1,e8); add 'auto' to fallback\n"
         "  -o F   Output verified results to file (default: stdout)\n"
         "  -e F   Output unresolved lines to file (default: stderr)\n"
@@ -10758,10 +10988,7 @@ int main(int argc, char **argv)
     int opt, i;
     char *outfile = NULL, *errfile = NULL;
     char *modespec = NULL;
-    int quantize = 128;
     int show_help = 0;
-
-    (void)quantize;
     (void)Version;
 
     Numthreads = get_nprocs();
@@ -10783,7 +11010,8 @@ int main(int argc, char **argv)
             if (Maxiter < 1) Maxiter = 1;
             break;
         case 'q':
-            quantize = atoi(optarg);
+            Iterstep = atoi(optarg);
+            if (Iterstep < 1) Iterstep = 1;
             break;
         case 'o':
             outfile = optarg;
