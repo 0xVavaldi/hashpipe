@@ -248,6 +248,18 @@ hashpipe -m e1,e8,e450 potfile.txt
 hashpipe -m e1-e12,e369,e450-e461 potfile.txt
 ```
 
+## Acknowledgments
+
+hashpipe depends on the following libraries:
+
+- [OpenSSL](https://github.com/openssl/openssl) — OpenSSL Project
+- [yarn.c](https://github.com/madler/pigz) — Mark Adler (from pigz)
+- [libJudy](https://judy.sourceforge.net/) — Doug Baskins (Hewlett-Packard)
+- [sphlib](https://github.com/pornin/sphlib) — Thomas Pornin (Projet RNRT SAPHIR)
+- [RHash](https://github.com/rhash/RHash) — RHash Project
+- [libmhash](https://mhash.sourceforge.net/) — Nikos Mavroyanopoulos, Sascha Schumann
+- [bcrypt](https://www.openwall.com/crypt/) — Niels Provos, David Mazieres (via Openwall crypt_blowfish)
+
 ## License
 
 MIT
