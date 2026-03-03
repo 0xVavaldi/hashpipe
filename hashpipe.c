@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.18 2026/03/03 05:09:37 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.20 2026/03/03 14:57:25 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +22,55 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.18 202
 
 /* OpenSSL extra */
 #include <openssl/hmac.h>
+#ifndef OPENSSL_NO_MDC2
 #include <openssl/mdc2.h>
+#else
+/* MDC2 fallback for builds where OpenSSL disables MDC2 (e.g. Ubuntu no-mdc2).
+ * Based on OpenSSL 1.0.1e crypto/mdc2/mdc2dgst.c (Eric Young).
+ * Suggested by @0xVavaldi (GitHub PR #1). */
+#include <openssl/des.h>
+#define MDC2_BLOCK		8
+#define MDC2_DIGEST_LENGTH	16
+static void mdc2_body_blk(unsigned char h[8], unsigned char hh[8],
+			   const unsigned char blk[8])
+{
+	DES_key_schedule ks;
+	unsigned char out1[8], out2[8];
+	int j;
+	h[0] = (h[0] & 0x9f) | 0x40;
+	hh[0] = (hh[0] & 0x9f) | 0x20;
+	DES_set_odd_parity((DES_cblock *)h);
+	DES_set_key_unchecked((DES_cblock *)h, &ks);
+	DES_ecb_encrypt((DES_cblock *)blk, (DES_cblock *)out1, &ks, DES_ENCRYPT);
+	DES_set_odd_parity((DES_cblock *)hh);
+	DES_set_key_unchecked((DES_cblock *)hh, &ks);
+	DES_ecb_encrypt((DES_cblock *)blk, (DES_cblock *)out2, &ks, DES_ENCRYPT);
+	for (j = 0; j < 8; j++) { out1[j] ^= blk[j]; out2[j] ^= blk[j]; }
+	memcpy(h, out1, 4); memcpy(h + 4, out2 + 4, 4);
+	memcpy(hh, out2, 4); memcpy(hh + 4, out1 + 4, 4);
+}
+static unsigned char *MDC2(const unsigned char *d, size_t n, unsigned char *md)
+{
+	unsigned char h[8], hh[8], block[8];
+	size_t i;
+	unsigned int num;
+	memset(h, 0x52, 8);
+	memset(hh, 0x25, 8);
+	for (i = 0; i + 8 <= n; i += 8)
+		mdc2_body_blk(h, hh, d + i);
+	num = n - i;
+	/* Final (pad_type=1): process partial block zero-padded */
+	if (num > 0) {
+		memset(block, 0, 8);
+		memcpy(block, d + i, num);
+		mdc2_body_blk(h, hh, block);
+	}
+	memcpy(md, h, 8);
+	memcpy(md + 8, hh, 8);
+	return md;
+}
+#endif
+#include "yescrypt/yescrypt.h"
 
 /* SPH library (SHA-3 competition candidates + classic hashes) */
 #include <sph_blake.h>
@@ -3313,7 +3361,7 @@ static void compute_sha1revbase64(const unsigned char *pass, int passlen,
     SHA1((unsigned char *)b64, blen, dest);
 }
 
-/* SHA1revBASE64x: SHA1(reverse(base64x(pass))) — base64 without padding, salt present */
+/* SHA1revBASE64x: SHA1(reverse(base64(pass))) — base64 with padding, salt present */
 static void compute_sha1revbase64x(const unsigned char *pass, int passlen,
     const unsigned char *salt, int saltlen, unsigned char *dest)
 {
@@ -3321,8 +3369,6 @@ static void compute_sha1revbase64x(const unsigned char *pass, int passlen,
     int blen;
     (void)salt; (void)saltlen;
     blen = base64_encode(pass, passlen, b64, sizeof(b64));
-    /* Strip trailing '=' padding */
-    while (blen > 0 && b64[blen - 1] == '=') blen--;
     reverse_str(b64, blen);
     SHA1((unsigned char *)b64, blen, dest);
 }
@@ -3443,8 +3489,8 @@ static void compute_sha1md5md5ucx(const unsigned char *pass, int passlen,
     SHA1((unsigned char *)hex2, 32, dest);
 }
 
-/* SHA1revBASE64x: outer=iterate base64-no-pad + reverse, inner=iterate SHA1.
- * x01 salt=N: SHA1(reverse(base64_nopad^N(pass))) */
+/* SHA1revBASE64x: outer=iterate base64 + reverse, inner=iterate SHA1.
+ * x01 salt=N: SHA1(reverse(base64^N(pass))) */
 static void compute_sha1revbase64x_outer(const unsigned char *pass, int passlen,
     const unsigned char *salt, int saltlen, unsigned char *dest)
 {
@@ -3454,7 +3500,6 @@ static void compute_sha1revbase64x_outer(const unsigned char *pass, int passlen,
     int outer = salt_to_int(salt, saltlen);
     for (i = 0; i < outer; i++) {
         int blen = base64_encode(cur, curlen, b64, sizeof(b64));
-        while (blen > 0 && b64[blen - 1] == '=') blen--;
         /* reverse into rev */
         {
             int j;
@@ -3505,8 +3550,8 @@ static void compute_md4utf16sha1x(const unsigned char *pass, int passlen,
     compute_ntlm(cur, curlen, NULL, 0, dest);
 }
 
-/* MD4UTF16revBASE64x: outer=iterate base64-no-pad + reverse, inner=iterate NTLM.
- * x01 salt=N: NTLM(reverse(base64_nopad^N(pass))) */
+/* MD4UTF16revBASE64x: outer=iterate base64 + reverse, inner=iterate NTLM.
+ * x01 salt=N: NTLM(reverse(base64^N(pass))) */
 static void compute_md4utf16revbase64x(const unsigned char *pass, int passlen,
     const unsigned char *salt, int saltlen, unsigned char *dest)
 {
@@ -3516,7 +3561,6 @@ static void compute_md4utf16revbase64x(const unsigned char *pass, int passlen,
     int outer = salt_to_int(salt, saltlen);
     for (i = 0; i < outer; i++) {
         int blen = base64_encode(cur, curlen, b64, sizeof(b64));
-        while (blen > 0 && b64[blen - 1] == '=') blen--;
         {
             int j;
             for (j = 0; j < blen; j++) rev[blen - 1 - j] = b64[j];
@@ -5022,7 +5066,7 @@ static int base64_encode(const unsigned char *in, int inlen, char *out, int outm
         }
         out[o++] = '=';
     }
-    out[o] = 0;
+    if (o < outmax) out[o] = 0;  /* bounds check — @0xVavaldi */
     return o;
 }
 
@@ -7718,6 +7762,55 @@ static int verify_apr1(const char *hashstr, int hashlen,
     }
 }
 
+/* SCRYPT: crypto_scrypt(pass, salt, N, r, p, output, 32)
+ * Format: SCRYPT:N:r:p:base64_salt:base64_hash:password */
+static int verify_scrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char buf[512];
+    char *f[6]; /* SCRYPT, N, r, p, b64salt, b64hash */
+    int fi = 0;
+    unsigned char salt_bin[256], output[32];
+    char b64out[64];
+
+    if (hashlen < 20 || hashlen >= (int)sizeof(buf)) return 0;
+    if (memcmp(hashstr, "SCRYPT:", 7) != 0) return 0;
+
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    /* Parse SCRYPT:N:r:p:b64salt:b64hash into 6 fields */
+    f[0] = buf;
+    { char *sp = buf;
+      while (*sp && fi < 5) {
+        if (*sp == ':') { *sp = 0; fi++; f[fi] = sp + 1; }
+        sp++;
+      }
+    }
+    if (fi < 5) return 0;
+
+    unsigned long long sc_N = strtoull(f[1], NULL, 10);
+    int sc_r = atoi(f[2]);
+    int sc_p = atoi(f[3]);
+    if (sc_N == 0 || sc_r == 0 || sc_p == 0) return 0;
+
+    /* Decode base64 salt */
+    int sc_salt_len = base64_decode(f[4], strlen(f[4]), salt_bin, sizeof(salt_bin));
+    if (sc_salt_len <= 0) return 0;
+
+    /* Compute scrypt */
+    int ret = crypto_scrypt((const uint8_t *)pass, passlen,
+                            salt_bin, sc_salt_len,
+                            sc_N, sc_r, sc_p,
+                            output, 32);
+    if (ret != 0) return 0;
+
+    /* Base64-encode output and compare */
+    int b64len = base64_encode(output, 32, b64out, sizeof(b64out));
+    if (b64len != (int)strlen(f[5])) return 0;
+    return memcmp(b64out, f[5], b64len) == 0;
+}
+
 /* ---- Chain arrays for types needing HTC registration ---- */
 static struct chain_step chain_md5sha1ucmd5uc[] = { SU_MD5, SU_SHA1, S_MD5 };
 /* chain_md5md5ucsha1md5md5 defined earlier */
@@ -8807,6 +8900,7 @@ static void init_hashtypes(void)
     HTV("BCRYPTSHA1", 0, verify_bcryptsha1, "$2b$12$0gky1pAf50ToA0A9tqo8P.JCO.x82x3oKv7QflLyP/ZuuDVWFs43m:password123");
     HTV("PHPBB3",     0, verify_phpbb3, "$H$997LdNzHMtxNZ26WousH1K.At2SnCs0:password123");
     HTV("APR1",       0, verify_apr1, "$apr1$rndSa1t$UuNY2EWlcn4SkHJxQh1G3/:password123");
+    HTV("SCRYPT",     0, verify_scrypt, "SCRYPT:1024:1:1:MDIwMzMwNTQwNDQyNQ==:5FW+zWivLxgCWj7qLiQbeC8zaNQ+qdO0NUinvqyFcfo=:hashcat");
 
     #undef HT
     #undef HTC
@@ -9308,11 +9402,24 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             item->match_iter = 1;
             return;
         }
-        /* Hint failed — try other verify types in ModeList */
-        {
+        /* Hint failed — try other verify types */
+        if (ModeCount > 0) {
             int m;
             for (m = 0; m < ModeCount; m++) {
                 struct hashtype *ht = &Hashtypes[ModeList[m]];
+                if (!ht->verify || ht == item->hint) continue;
+                if (ht->verify(item->hashstr, item->hashlen, vpass, vpasslen)) {
+                    item->verified = 1;
+                    item->match_type = ht;
+                    item->match_iter = 1;
+                    return;
+                }
+            }
+        } else {
+            /* Auto-detect: scan all verify types */
+            int v;
+            for (v = 0; v < Numtypes; v++) {
+                struct hashtype *ht = &Hashtypes[v];
                 if (!ht->verify || ht == item->hint) continue;
                 if (ht->verify(item->hashstr, item->hashlen, vpass, vpasslen)) {
                     item->verified = 1;
@@ -10257,6 +10364,8 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
 
     /* Non-hex verify types skip hex validation */
     if (item->hint && item->hint->verify) {
+        /* Verify types with internal colons: use last colon as hash:password boundary */
+        item->hashlen = colon_last - hashstart;
         if (item->hashlen < 2) return 0;
         item->hashstr = batch_strdup(b, hashstart, item->hashlen);
         if (!item->hashstr) return 0;
@@ -10272,12 +10381,14 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
             if (_found) {
                 item->hint = &Hashtypes[ModeList[_m]];
             } else if (ModeCount == 0) {
-                /* Auto-detect: accept non-hex, verify_item will scan all types */
+                /* Auto-detect: accept non-hex, set hint to first verify type */
                 for (_m = 0; _m < Numtypes; _m++)
                     if (Hashtypes[_m].verify) { _found = 1; break; }
-                /* No hint — verify_item tries all verify types */
+                if (_found) item->hint = &Hashtypes[_m];
             }
             if (!_found) return 0;
+            /* Use last colon as hash:password boundary for multi-colon hash formats */
+            item->hashlen = colon_last - hashstart;
             item->hashstr = batch_strdup(b, hashstart, item->hashlen);
             if (!item->hashstr) return 0;
             item->hash_is_uc = 0;
@@ -10296,6 +10407,16 @@ hash_parsed:
     item->alt_passlen = 0;
     item->fullpass = NULL;
     item->fullpasslen = 0;
+
+    /* Verify types with internal colons: hash = p..colon_last, password = after colon_last */
+    if (item->hint && item->hint->verify && ncolons > 1) {
+        item->salt = NULL;
+        item->saltlen = 0;
+        item->password = batch_strdup(b, colon_last + 1, end - (colon_last + 1));
+        item->passlen = end - (colon_last + 1);
+        if (!item->password) return 0;
+        return 1;
+    }
 
     if (ncolons == 1) {
         /* hash:password */
@@ -10968,6 +11089,7 @@ static void init_rates(void)
         {837, 124372LL}, {838, 125236LL}, {839, 111172LL}, {840, 111886LL},
         {841, 2648787LL}, {842, 2594592LL}, {843, 2632009LL}, {844, 5284524LL},
         {845, 3172941LL}, {846, 4023442LL}, {847, 4203886LL}, {857, 5247548LL},
+        {884, 7050LL},
     };
     int i, n = (int)(sizeof(bench_rates) / sizeof(bench_rates[0]));
     for (i = 0; i < n; i++) {
